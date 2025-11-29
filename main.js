@@ -24,7 +24,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       const chatId = message.chat.id;
       const userText = message.text || "";
 
-      // === APPEL OPENAI ===
+      // ===== OPENAI CALL =====
       const aiResponse = await axios.post(
         "https://api.openai.com/v1/responses",
         {
@@ -39,10 +39,21 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         }
       );
 
-      // Le vrai champ OpenAI = aiResponse.data.output_text
-      const botReply = aiResponse.data.output_text?.[0] || "Désolé, je n'ai pas compris 🤖";
+      // === EXTRACTION DU TEXTE ===
+      let botReply = "Désolé, je n'ai pas compris 🤖";
 
-      // === RÉPONSE TELEGRAM ===
+      if (
+        aiResponse.data &&
+        aiResponse.data.output &&
+        aiResponse.data.output[0] &&
+        aiResponse.data.output[0].content &&
+        aiResponse.data.output[0].content[0] &&
+        aiResponse.data.output[0].content[0].text
+      ) {
+        botReply = aiResponse.data.output[0].content[0].text;
+      }
+
+      // === ENVOI DU MESSAGE TELEGRAM ===
       await axios.post(
         `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
         {
@@ -75,4 +86,3 @@ app.listen(PORT, async () => {
     console.log("Erreur setWebhook :", err.response?.data || err);
   }
 });
-
