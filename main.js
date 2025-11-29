@@ -6,319 +6,154 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// === CONFIG ===
+// === ENV ===
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-// === TEST ROUTE ===
-app.get("/", (req, res) => {
-  res.send("BotVictorV1 · BTC · IA · OKX · Emojis 👑");
-});
+const OKX_API_KEY = process.env.OKX_API_KEY;
+const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY;
+const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE;
 
-// === OKX : TICKER BTC-USDT ===
-async function getBtcTicker() {
-  try {
-    const response = await axios.get(
-      "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"
-    );
+const OKX_BASE_URL = "https://www.okx.com";
 
-    const data = response.data?.data?.[0];
-    if (!data) return null;
+// === UTIL : signature OKX ===
+import crypto from "crypto";
 
-    const last = parseFloat(data.last);
-    const open = parseFloat(data.sodUtc0Price || data.open24h || last);
-    const changePct =
-      open > 0 ? (((last - open) / open) * 100).toFixed(2) : "0.00";
-
-    return {
-      last: last.toLocaleString("en-US", { maximumFractionDigits: 2 }),
-      high: parseFloat(data.high24h).toLocaleString("en-US", { maximumFractionDigits: 2 }),
-      low: parseFloat(data.low24h).toLocaleString("en-US", { maximumFractionDigits: 2 }),
-      vol: parseFloat(data.vol24h).toLocaleString("en-US", { maximumFractionDigits: 2 }),
-      change: changePct
-    };
-  } catch (err) {
-    console.log("Erreur OKX :", err.response?.data || err);
-    return null;
-  }
+function sign(message, secret) {
+  return crypto.createHmac("sha256", secret).update(message).digest("base64");
 }
 
-// === IA HELPER ===
-async function askAI(prompt) {
+async function okxRequest(method, endpoint, body = "") {
+  const timestamp = new Date().toISOString();
+  const signStr = timestamp + method.toUpperCase() + endpoint + (body ? JSON.stringify(body) : "");
+  const signature = sign(signStr, OKX_SECRET_KEY);
+
+  return axios({
+    url: OKX_BASE_URL + endpoint,
+    method,
+    headers: {
+      "OK-ACCESS-KEY": OKX_API_KEY,
+      "OK-ACCESS-SIGN": signature,
+      "OK-ACCESS-TIMESTAMP": timestamp,
+      "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
+      "Content-Type": "application/json",
+    },
+    data: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+// === ROUTE TEST ===
+app.get("/", (req, res) => {
+  res.send("BotVictorV1 Auto Trading + IA 🚀");
+});
+
+// === AUTO-ANALYSE BTC ===
+async function analyseBTC() {
   try {
-    const aiResponse = await axios.post(
+    const r = await axios.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCEUR");
+    const price = parseFloat(r.data.price);
+
+    const ai = await axios.post(
       "https://api.openai.com/v1/responses",
       {
         model: "gpt-4.1-mini",
-        input: prompt
+        input: `
+Tu es un bot de trading. 
+Prix actuel BTC/EUR : ${price}.
+Analyse RSI, tendance, momentum.
+Décide UNIQUEMENT : "LONG", "SHORT" ou "WAIT".
+Répond juste par le mot.
+        `,
       },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
+      { headers: { Authorization: `Bearer ${OPENAI_KEY}` } }
     );
 
-    const text =
-      aiResponse.data?.output?.[0]?.content?.[0]?.text ||
-      "Désolé, je n'ai pas compris 🤖";
-
-    return text;
+    return ai.data.output_text.trim().toUpperCase();
   } catch (err) {
-    console.log("Erreur OpenAI :", err.response?.data || err);
-    return "Erreur IA 😢";
+    console.log("Erreur analyse :", err.response?.data || err);
+    return "WAIT";
+  }
+}
+
+// === EXECUTION TRADE ===
+async function tradeBTC(direction) {
+  try {
+    const body = {
+      instId: "BTC-EUR",
+      tdMode: "cash",
+      side: direction === "LONG" ? "buy" : "sell",
+      ordType: "market",
+      sz: "0.0001",
+    };
+
+    await okxRequest("POST", "/api/v5/trade/order", body);
+    return true;
+  } catch (err) {
+    console.log("Erreur trade :", err.response?.data || err);
+    return false;
   }
 }
 
 // === WEBHOOK TELEGRAM ===
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  try {
-    const message = req.body.message;
+  const msg = req.body.message;
+  if (!msg) return res.sendStatus(200);
 
-    if (message) {
-      const chatId = message.chat.id;
-      const userText = (message.text || "").trim();
+  const chatId = msg.chat.id;
+  const userText = msg.text || "";
 
-      // ===============================
-      //       COMMANDES EMOJI BTC
-      // ===============================
+  if (userText === "🪙") {
+    const signal = await analyseBTC();
+    let action = "";
 
-      // 🪙 — Prix instantané BTC
-      if (userText === "🪙") {
-        const t = await getBtcTicker();
-        if (!t) {
-          await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-            {
-              chat_id: chatId,
-              text: "Impossible d'obtenir le prix BTC pour le moment 😢"
-            }
-          );
-          return res.sendStatus(200);
-        }
-
-        const msg =
-          `🪙 *Bitcoin — Prix instantané*\n` +
-          `💰 *${t.last}$*\n\n` +
-          `📉 24h : *${t.change}%*\n` +
-          `📌 High : ${t.high}$\n` +
-          `📌 Low  : ${t.low}$\n\n` +
-          `⏳ Données mises à jour à l'instant (OKX)`;
-
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: msg,
-            parse_mode: "Markdown"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // 📈 — Analyse premium BTC (OKX + IA)
-      if (userText === "📈") {
-        const t = await getBtcTicker();
-        if (!t) {
-          await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-            {
-              chat_id: chatId,
-              text: "Impossible d'obtenir les données BTC 😢"
-            }
-          );
-          return res.sendStatus(200);
-        }
-
-        const baseMsg =
-          `👑 *BTC — LIVE*\n` +
-          `💰 Prix : *${t.last}$*\n` +
-          `📉 24h : *${t.change}%*\n` +
-          `📊 Volume : ${t.vol}\n` +
-          `📌 High : ${t.high}$\n` +
-          `📌 Low  : ${t.low}$\n\n` +
-          `⏳ Données actualisées en temps réel (OKX)\n\n`;
-
-        const aiText = await askAI(
-          `Fais une mini analyse de marché sur Bitcoin (BTC) avec un ton simple, clair et utile. Pas de dates précises, juste une lecture du contexte possible.`
-        );
-
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: baseMsg + aiText,
-            parse_mode: "Markdown"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // 📊 — Market overview BTC seulement
-      if (userText === "📊") {
-        const t = await getBtcTicker();
-        if (!t) {
-          await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-            {
-              chat_id: chatId,
-              text: "Impossible d'obtenir l'overview BTC 😢"
-            }
-          );
-          return res.sendStatus(200);
-        }
-
-        const msg =
-          `✨ *Marché Bitcoin — LIVE*\n` +
-          `BTC : *${t.last}$* · *${t.change}%*\n\n` +
-          `📌 High 24h : ${t.high}$\n` +
-          `📌 Low  24h : ${t.low}$\n` +
-          `📊 Volume 24h : ${t.vol}\n\n` +
-          `🔗 Source : OKX (données temps réel)`;
-
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: msg,
-            parse_mode: "Markdown"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // 📉 — Sentiment BTC (IA, sans dates)
-      if (userText === "📉") {
-        const aiText = await askAI(
-          "Donne un ressenti simple et clair sur le marché Bitcoin en général, sans parler de dates précises. Parle juste des comportements possibles (peur, euphorie, neutralité)."
-        );
-
-        const msg =
-          `💎 *Sentiment du marché BTC*\n\n` +
-          `${aiText}\n\n` +
-          `⏳ Analyse générée par IA (sans date précise).`;
-
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: msg,
-            parse_mode: "Markdown"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // 🔥 — Opportunité du moment (BTC)
-      if (userText === "🔥") {
-        const t = await getBtcTicker();
-        const aiText = await askAI(
-          "Donne une idée d'opportunité de trade simple sur Bitcoin (BTC), en restant prudent, sans donner de conseil financier direct. Style mentor, court et clair."
-        );
-
-        const header = t
-          ? `🔥 *Opportunité BTC (info prix actuelle : ~${t.last}$)*\n\n`
-          : `🔥 *Opportunité BTC*\n\n`;
-
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: header + aiText,
-            parse_mode: "Markdown"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // 🧠 — Stratégie premium BTC
-      if (userText === "🧠") {
-        const aiText = await askAI(
-          "Propose une stratégie de trading simple et disciplinée sur Bitcoin pour un trader débutant/intermédiaire. Pas de promesse de gains, juste de la structure."
-        );
-
-        const msg =
-          `🧠 *Stratégie premium BTC*\n\n` +
-          `${aiText}`;
-
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: msg,
-            parse_mode: "Markdown"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // 🤖 — Mode discussion IA
-      if (userText === "🤖") {
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text:
-              "🤖 Mode IA activé.\nParle-moi de Bitcoin, trading, mindset, ce que tu veux 👑"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // 📘 — Explications pédagogiques
-      if (userText.startsWith("📘")) {
-        const topic = userText.replace("📘", "").trim() || "bitcoin";
-        const aiText = await askAI(
-          `Explique en mode simple et pédagogique : ${topic}.`
-        );
-
-        const msg =
-          `📘 *Explication IA — ${topic}*\n\n` +
-          `${aiText}`;
-
-        await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: msg,
-            parse_mode: "Markdown"
-          }
-        );
-        return res.sendStatus(200);
-      }
-
-      // === MODE PAR DÉFAUT : IA CLASSIQUE ===
-      const aiReply = await askAI(userText);
-      await axios.post(
-        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-        {
-          chat_id: chatId,
-          text: aiReply
-        }
-      );
+    if (signal === "LONG" || signal === "SHORT") {
+      await tradeBTC(signal);
+      action = `📈 Action exécutée automatiquement : **${signal}**`;
+    } else {
+      action = "⏳ Marché incertain, j'attends un meilleur moment.";
     }
 
-    res.sendStatus(200);
-  } catch (err) {
-    console.log("Erreur Webhook :", err.response?.data || err);
-    res.sendStatus(500);
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      chat_id: chatId,
+      text: `Analyse du marché : ${signal}\n${action}`,
+      parse_mode: "Markdown",
+    });
+
+    return res.sendStatus(200);
   }
+
+  // Réponse IA classique
+  const ai = await axios.post(
+    "https://api.openai.com/v1/responses",
+    {
+      model: "gpt-4.1-mini",
+      input: userText
+    },
+    {
+      headers: { Authorization: `Bearer ${OPENAI_KEY}` }
+    }
+  );
+
+  const reply = ai.data.output_text || "Désolé j'ai pas capté 🤖";
+
+  await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+    chat_id: chatId,
+    text: reply
+  });
+
+  res.sendStatus(200);
 });
 
 // === START SERVER ===
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
-  console.log("BotVictorV1 lancé sur Render 🔥 PORT:", PORT);
+  console.log("Bot lancé sur Render 🔥");
 
-  const webhookUrl = `https://botvictorv1.onrender.com/webhook/${TELEGRAM_TOKEN}`;
-
+  const url = `https://botvictorv1.onrender.com/webhook/${TELEGRAM_TOKEN}`;
   try {
-    const r = await axios.get(
-      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${webhookUrl}`
-    );
-    console.log("Webhook activé :", r.data);
-  } catch (err) {
-    console.log("Erreur setWebhook :", err.response?.data || err);
+    await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${url}`);
+    console.log("Webhook OK :", url);
+  } catch (e) {
+    console.log("Erreur Webhook :", e.response?.data || e);
   }
 });
