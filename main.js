@@ -21,17 +21,4 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const message = req.body.message;
 
     if (message) {
-      const chatId = message.chat.id;
-      const userText = message.text || "";
-
-      // ====== IA OPENAI ======
-      const aiResponse = await axios.post(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          model: "gpt-4.1",
-          messages: [
-            { role: "system", content: "Tu es BotVictorV1, un bot utile et intelligent." },
-            { role: "user", content: userText }
-          ]
-        },
-        { h
+      const chatId = m
