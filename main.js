@@ -18,24 +18,21 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY;
 const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE;
 
 const OKX_BASE = "https://www.okx.com";
-const SYMBOL = "BTC-USDT";        // Spot
-const AGGRESSIVE_PCT = 0.10;      // 10% du capital USDT
 
 // ==============================
 // 🧩 SIGNATURE OKX (V5)
 // ==============================
-function sign(message, secret) {
-  return crypto.createHmac("sha256", secret).update(message).digest("base64");
+function sign(message) {
+  return crypto.createHmac("sha256", OKX_SECRET_KEY)
+    .update(message)
+    .digest("base64");
 }
 
-async function okxRequest(method, endpoint, body = "") {
+async function okxRequest(method, endpoint, body) {
   const timestamp = new Date().toISOString();
   const payload = body ? JSON.stringify(body) : "";
-
-  const signature = sign(
-    timestamp + method.toUpperCase() + endpoint + payload,
-    OKX_SECRET_KEY
-  );
+  const prehash = timestamp + method.toUpperCase() + endpoint + payload;
+  const signature = sign(prehash);
 
   return axios({
     url: OKX_BASE + endpoint,
@@ -45,69 +42,77 @@ async function okxRequest(method, endpoint, body = "") {
       "OK-ACCESS-SIGN": signature,
       "OK-ACCESS-TIMESTAMP": timestamp,
       "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
-      "Content-Type": "application/json",
-      // 🔴 TRÈS IMPORTANT : DEMO TRADING
-      "x-simulated-trading": "1"
+      // Très important : clé reconnue comme DÉMO
+      "x-simulated-trading": "1",
+      "Content-Type": "application/json"
     },
-    data: payload
+    data: payload || undefined
   });
 }
 
 // ==============================
-// 💰 BALANCE USDT DISPONIBLE
+// 📈 PRIX BTC/USDT (OKX) + EUR
 // ==============================
-async function getUsdtBalance() {
+async function getMarketData() {
   try {
-    const r = await okxRequest(
-      "GET",
-      "/api/v5/account/balance?ccy=USDT"
+    const r = await axios.get(
+      "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"
     );
 
-    const details = r.data?.data?.[0]?.details?.[0];
-    const availBal = details ? parseFloat(details.availBal) : 0;
+    const ticker = r.data?.data?.[0];
+    const priceUSD = ticker ? parseFloat(ticker.last) : 0;
 
-    return availBal || 0;
+    let priceEUR = 0;
+
+    if (priceUSD > 0) {
+      try {
+        const eur = await axios.get(
+          "https://api.exchangerate.host/convert",
+          {
+            params: { from: "USD", to: "EUR", amount: priceUSD }
+          }
+        );
+        if (eur.data && typeof eur.data.result === "number") {
+          priceEUR = eur.data.result;
+        } else {
+          priceEUR = priceUSD * 0.9; // fallback approx
+        }
+      } catch (e) {
+        console.log("Erreur conversion EUR :", e.response?.data || e.message);
+        priceEUR = priceUSD * 0.9; // fallback approx
+      }
+    }
+
+    return { priceUSD, priceEUR };
   } catch (e) {
-    console.log("Erreur balance USDT :", e.response?.data || e);
-    return 0;
+    console.log("Erreur market data OKX :", e.response?.data || e.message);
+    return { priceUSD: 0, priceEUR: 0 };
   }
 }
 
 // ==============================
-// 🧠 ANALYSE IA + CONFIANCE
+// 🤖 SIGNAL IA (direction + confiance)
 // ==============================
 async function getSignal() {
+  const { priceUSD, priceEUR } = await getMarketData();
+
   try {
-    // Prix BTC en USDT (Binance)
-    const r = await axios.get(
-      "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-    );
-    const price = parseFloat(r.data.price);
-
-    // Conversion en €
-    const eur = await axios.get(
-      "https://api.exchangerate.host/convert?from=USD&to=EUR&amount=" + price
-    );
-    const priceEUR = eur.data.result;
-
-    // IA DECISION
     const ai = await axios.post(
       "https://api.openai.com/v1/responses",
       {
         model: "gpt-4.1-mini",
         input: `
-Analyse le Bitcoin pour du trading spot agressif (scalping / court terme).
-Données :
-- Prix BTC : ${price} USDT (~${priceEUR} EUR)
+Tu es un trader crypto agressif mais pas suicidaire.
+Analyse uniquement le BTC/USDT en SPOT, sur une vision court terme.
 
-Donne UNIQUEMENT :
+Prix actuel : ${priceUSD} USDT (~${priceEUR} EUR).
+
+Réponds STRICTEMENT dans ce format (en français) :
+
 DIRECTION: LONG ou SHORT
-CONFIANCE: nombre entre 0 et 100 (entier)
-
-Exemple de réponse:
-DIRECTION: LONG
-CONFIANCE: 73
-        `.trim()
+CONFIANCE: nombre entre 0 et 100
+RAISON: une phrase très courte
+        `
       },
       {
         headers: {
@@ -118,101 +123,79 @@ CONFIANCE: 73
     );
 
     const txt = ai.data.output_text || "";
-    const direction = txt.match(/DIRECTION:\s*(LONG|SHORT)/i)?.[1]?.toUpperCase() || "LONG";
-    const confiance = parseInt(
-      txt.match(/CONFIANCE:\s*(\d+)/i)?.[1] || "50",
-      10
-    );
+    const dirMatch = txt.match(/DIRECTION:\s*(LONG|SHORT)/i);
+    const confMatch = txt.match(/CONFIANCE:\s*(\d+)/i);
+    const raisonMatch = txt.match(/RAISON:\s*(.+)/i);
 
-    return { direction, confiance, price, priceEUR };
+    const direction = (dirMatch && dirMatch[1].toUpperCase()) || "LONG";
+    const confiance = confMatch ? parseInt(confMatch[1], 10) : 50;
+    const raison = raisonMatch ? raisonMatch[1].trim() : "Analyse rapide.";
+
+    return { direction, confiance, priceUSD, priceEUR, raison, raw: txt };
   } catch (e) {
-    console.log("Erreur analyse IA :", e.response?.data || e);
-    // Valeurs par défaut si l'IA bug
-    return { direction: "LONG", confiance: 50, price: 0, priceEUR: 0 };
-  }
-}
-
-// ==============================
-// 🛒 TRADE SPOT BTC/USDT (MARKET)
-// ==============================
-async function placeSpotTrade(direction, price) {
-  try {
-    // 1) Récupérer le capital USDT
-    const usdt = await getUsdtBalance();
-
-    if (!usdt || usdt <= 0) {
-      return { ok: false, reason: "Pas de capital USDT dispo." };
-    }
-
-    // 2) Taille agressive : 10% du capital
-    const notional = usdt * AGGRESSIVE_PCT; // en USDT
-
-    // On évite les ordres ridicules
-    if (notional < 10) {
-      return {
-        ok: false,
-        reason: `Capital trop faible pour trade agressif (10% = ${notional.toFixed(
-          2
-        )} USDT)`
-      };
-    }
-
-    // 3) Convertir en BTC (quantité)
-    const qtyBTC = price > 0 ? notional / price : 0;
-    if (qtyBTC <= 0) {
-      return { ok: false, reason: "Prix invalide pour calculer la taille." };
-    }
-
-    const side = direction === "LONG" ? "buy" : "sell";
-
-    const body = {
-      instId: SYMBOL,       // BTC-USDT
-      tdMode: "cash",       // Spot
-      side,                 // buy / sell
-      ordType: "market",    // Market
-      sz: qtyBTC.toFixed(6) // quantité en BTC
+    console.log("Erreur OpenAI signal :", e.response?.data || e.message);
+    return {
+      direction: "LONG",
+      confiance: 50,
+      priceUSD,
+      priceEUR,
+      raison: "Fallback après erreur IA.",
+      raw: ""
     };
-
-    const r = await okxRequest("POST", "/api/v5/trade/order", body);
-
-    const code = r.data?.code;
-    const msg = r.data?.msg;
-    const ordId = r.data?.data?.[0]?.ordId || null;
-
-    if (code === "0") {
-      return { ok: true, ordId, raw: r.data, notional, qtyBTC };
-    } else {
-      return { ok: false, reason: `OKX code=${code} msg=${msg}` };
-    }
-  } catch (e) {
-    console.log("Erreur placeSpotTrade :", e.response?.data || e);
-    return { ok: false, reason: "Erreur réseau / API OKX" };
   }
 }
 
 // ==============================
-// 📨 ENVOI TELEGRAM
+// 🪙 ORDRE SPOT BTC/USDT (DÉMO)
+// ==============================
+async function placeSpotOrder(direction) {
+  // En SPOT sans marge, on ne peut pas vraiment shorter.
+  const side = direction === "LONG" ? "buy" : "sell";
+
+  if (side === "sell") {
+    return {
+      simulated: true,
+      note: "Pas de short possible en SPOT démo, trade ignoré."
+    };
+  }
+
+  const body = {
+    instId: "BTC-USDT",
+    tdMode: "cash",     // SPOT
+    side,               // buy
+    ordType: "market",  // au marché
+    sz: "0.001"         // 0.001 BTC pour tester
+  };
+
+  try {
+    const r = await okxRequest("POST", "/api/v5/trade/order", body);
+    return r.data;
+  } catch (e) {
+    console.log("Erreur OKX spot :", e.response?.data || e.message);
+    return { error: e.response?.data || e.message };
+  }
+}
+
+// ==============================
+// ✉️ TELEGRAM
 // ==============================
 async function sendTG(chatId, text) {
-  await axios.post(
-    `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-    {
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown"
-    }
-  );
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+      {
+        chat_id: chatId,
+        text,
+        parse_mode: "Markdown"
+      }
+    );
+  } catch (e) {
+    console.log("Erreur Telegram :", e.response?.data || e.message);
+  }
 }
 
 // ==============================
-// ✅ ROUTE TEST
-// ==============================
-app.get("/", (req, res) => {
-  res.send("BotVictorV1 Spot BTC/USDT + IA + OKX DEMO ✅");
-});
-
-// ==============================
-// 🤖 WEBHOOK TELEGRAM
+// 🔔 WEBHOOK TELEGRAM
 // ==============================
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const message = req.body.message;
@@ -221,66 +204,55 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const chatId = message.chat.id;
   const text = message.text || "";
 
-  try {
-    // 🪙 = TRADE AUTO AGRESSIF
-    if (text === "🪙") {
-      await sendTG(
-        chatId,
-        "⏳ *Analyse du marché BTC...*\nJe regarde le prix et je calcule un signal."
-      );
+  // 🪙 = auto-trade
+  if (text === "🪙") {
+    const { direction, confiance, priceUSD, priceEUR, raison } =
+      await getSignal();
 
-      const { direction, confiance, price, priceEUR } = await getSignal();
+    let result;
+    let actionText;
 
-      if (!price || price <= 0) {
-        await sendTG(
-          chatId,
-          "❌ Impossible de récupérer un prix BTC valide, je ne trade pas."
-        );
-        return res.sendStatus(200);
-      }
+    if (confiance >= 40) {
+      result = await placeSpotOrder(direction);
 
-      // 🔥 Mode agressif : on trade si confiance >= 45
-      if (confiance >= 45) {
-        const trade = await placeSpotTrade(direction, price);
-
-        if (trade.ok) {
-          const notional = trade.notional;
-          const qty = trade.qtyBTC;
-
-          const msg =
-            `🚀 *TRADE SPOT EXÉCUTÉ*\n\n` +
-            `📈 Pair : *${SYMBOL}*\n` +
-            `🎯 Direction : *${direction}*\n` +
-            `📊 Confiance IA : *${confiance}%*\n\n` +
-            `💰 Taille : *${qty.toFixed(6)} BTC* (~*${notional.toFixed(
-              2
-            )} USDT* ≈ *${(notional * (priceEUR / price)).toFixed(2)} €*)\n` +
-            `💵 Prix du BTC : *${price.toFixed(2)} USDT* (~*${priceEUR.toFixed(
-              2
-            )} €*)\n\n` +
-            `🎯 TP théorique : *+0,30%*\n` +
-            `🛑 SL théorique : *-0,20%*\n\n` +
-            `🧪 Mode : *OKX DEMO Spot Agressif*\n` +
-            `🆔 Ordre OKX : \`${trade.ordId}\``;
-
-          await sendTG(chatId, msg);
-        } else {
-          await sendTG(
-            chatId,
-            `⚠️ *Tentative de trade échouée*\nRaison : ${trade.reason}`
-          );
-        }
+      if (result?.simulated) {
+        actionText = "❌ Pas de short possible en SPOT démo, trade ignoré.";
+      } else if (result?.error) {
+        actionText = `⚠️ Erreur OKX : \`${JSON.stringify(result.error)}\``;
       } else {
-        await sendTG(
-          chatId,
-          `⚠️ *Marché jugé trop instable par l'IA*\nConfiance : *${confiance}%* (< 45%)\nJe protège ton capital, pas de trade.`
-        );
+        const ord = result?.data?.[0] || {};
+        actionText =
+          "✅ Ordre SPOT envoyé sur OKX (démo).\n" +
+          `• id: \`${ord.ordId || "inconnu"}\`\n` +
+          `• état: \`${ord.state || "unknown"}\``;
       }
-
-      return res.sendStatus(200);
+    } else {
+      actionText =
+        "⚠️ Confiance trop faible, je préfère rester hors marché.";
     }
 
-    // Sinon : discussion IA normale
+    const safeUSD = Number(priceUSD || 0);
+    const safeEUR = Number(priceEUR || 0);
+
+    const tp = safeUSD ? (safeUSD * 1.003).toFixed(2) : "—";
+    const sl = safeUSD ? (safeUSD * 0.998).toFixed(2) : "—";
+
+    const msg =
+      `🚀 *TRADE SPOT BTC/USDT (Démo)*\n\n` +
+      `🎯 Direction IA : *${direction}*\n` +
+      `📊 Confiance : *${confiance}%*\n` +
+      `💬 Raison : _${raison}_\n\n` +
+      `💰 Prix approx : *${safeUSD} USDT* (≈ *${safeEUR.toFixed(2)} €*)\n` +
+      `🎯 TP indicatif : *${tp} USDT*\n` +
+      `🛑 SL indicatif : *${sl} USDT*\n\n` +
+      `${actionText}`;
+
+    await sendTG(chatId, msg);
+    return res.sendStatus(200);
+  }
+
+  // Sinon : chat IA normal
+  try {
     const ai = await axios.post(
       "https://api.openai.com/v1/responses",
       {
@@ -288,34 +260,48 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         input: text
       },
       {
-        headers: { Authorization: `Bearer ${OPENAI_KEY}` }
+        headers: {
+          Authorization: `Bearer ${OPENAI_KEY}`,
+          "Content-Type": "application/json"
+        }
       }
     );
 
-    await sendTG(chatId, ai.data.output_text || "🤖 J'ai pas capté.");
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.log("Erreur Webhook TG :", err.response?.data || err);
-    res.sendStatus(500);
+    const reply = ai.data.output_text || "🤖 Je n'ai pas compris.";
+    await sendTG(chatId, reply);
+  } catch (e) {
+    console.log("Erreur OpenAI chat :", e.response?.data || e.message);
+    await sendTG(chatId, "🤖 Erreur IA, réessaie dans 1 minute.");
   }
+
+  res.sendStatus(200);
 });
 
 // ==============================
-// 🚀 START SERVER + WEBHOOK
+// ✅ HEALTHCHECK
+// ==============================
+app.get("/", (req, res) => {
+  res.send("BotVictorV1 SPOT démo OKX + Telegram + IA ✅");
+});
+
+// ==============================
+> START SERVER + WEBHOOK
 // ==============================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
-  console.log("🔥 BotVictorV1 Spot agressif lancé sur Render - PORT:", PORT);
+  console.log("🔥 BotVictorV1 Spot démo lancé sur Render – PORT:", PORT);
 
   const webhookUrl = `https://botvictorv1.onrender.com/webhook/${TELEGRAM_TOKEN}`;
-
   try {
     const r = await axios.get(
-      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${webhookUrl}`
+      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook`,
+      { params: { url: webhookUrl } }
     );
     console.log("Webhook Telegram activé :", r.data);
-  } catch (err) {
-    console.log("Erreur setWebhook TG :", err.response?.data || err);
+  } catch (e) {
+    console.log(
+      "Erreur setWebhook Telegram :",
+      e.response?.data || e.message
+    );
   }
 });
