@@ -21,4 +21,57 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const message = req.body.message;
 
     if (message) {
-      const chatId = m
+      const chatId = message.chat.id;
+      const userText = message.text || "";
+
+      // Appel OpenAI
+      const aiResponse = await axios.post(
+        "https://api.openai.com/v1/responses",
+        {
+          model: "gpt-4.1-mini",
+          input: userText
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${OPENAI_KEY}`,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      const botReply =
+        aiResponse.data.output_text ||
+        "Désolé, je n'ai pas compris 🤖";
+
+      await axios.post(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+        {
+          chat_id: chatId,
+          text: botReply
+        }
+      );
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.log("Erreur Webhook :", err.response?.data || err);
+    res.sendStatus(500);
+  }
+});
+
+// === START SERVER ===
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, async () => {
+  console.log("BotVictorV1 lancé sur Render 🔥 PORT:", PORT);
+
+  const webhookUrl = `https://botvictorv1.onrender.com/webhook/${TELEGRAM_TOKEN}`;
+
+  try {
+    const r = await axios.get(
+      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${webhookUrl}`
+    );
+    console.log("Webhook activé :", r.data);
+  } catch (err) {
+    console.log("Erreur setWebhook :", err.response?.data || err);
+  }
+});
