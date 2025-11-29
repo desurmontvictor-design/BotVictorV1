@@ -15,7 +15,7 @@ app.get("/", (req, res) => {
   res.send("BotVictorV1 fonctionne 👑");
 });
 
-// === WEBHOOK TELEGRAM ===
+// === ROUTE WEBHOOK ===
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   try {
     const message = req.body.message;
@@ -24,29 +24,33 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       const chatId = message.chat.id;
       const text = message.text || "";
 
-      // Réponse automatique
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
         chat_id: chatId,
-        text: `🟣 BotVictorV1 te répond : ${text}`
+        text: `🤖 BotVictorV1 te répond : ${text}`
       });
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.log("Erreur Webhook:", err.response?.data || err);
+    console.log("Erreur Webhook :", err.response?.data || err);
     res.sendStatus(500);
   }
 });
 
 // === START SERVER ===
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log("BotVictorV1 lancé sur Render 🔥 PORT:", PORT);
 
-  // Active automatiquement le webhook à chaque démarrage
-  axios.get(
-    `https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=https://botvictorv1.onrender.com/webhook/${TELEGRAM_TOKEN}`
-  )
-    .then(() => console.log("Webhook Telegram activé ✔️"))
-    .catch(err => console.log("Erreur Webhook:", err.response?.data || err));
+  // Active automatiquement le webhook
+  const webhookUrl = `https://botvictorv1.onrender.com/webhook/${TELEGRAM_TOKEN}`;
+
+  try {
+    const r = await axios.get(
+      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${webhookUrl}`
+    );
+    console.log("Webhook activé :", r.data);
+  } catch (err) {
+    console.log("Erreur setWebhook :", err.response?.data || err);
+  }
 });
